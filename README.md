@@ -16,8 +16,8 @@ A TCP-based chat backend in C++.
 ```text
 .
 ├── CMakeLists.txt
-├── include/          # Public headers
-├── src/              # Server implementation
+├── include/cpp_chat/ # Public module headers
+├── src/              # Module implementations
 ├── tests/            # Unit and integration tests
 ├── config/           # Runtime config files
 ├── logs/             # Local runtime logs, ignored by git
@@ -32,3 +32,13 @@ cmake -S . -B build
 cmake --build build
 ```
 
+## Current Modules
+
+- `app`: application composition and lifecycle.
+- `core`: shared configuration and common types.
+- `network`: TCP listener, connections, and socket I/O.
+- `protocol`: client/server message model and wire protocol.
+- `session`: online users and connection binding.
+- `chat`: one-to-one and group message routing.
+- `storage`: chat history persistence boundary.
+- `logging`: server logs and diagnostics.
