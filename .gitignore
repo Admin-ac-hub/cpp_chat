@@ -1,0 +1,27 @@
+# Build outputs
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+Makefile
+compile_commands.json
+
+# Runtime files
+logs/*
+!logs/.gitkeep
+*.log
+
+# Binaries
+*.out
+*.exe
+*.dylib
+*.so
+*.a
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
