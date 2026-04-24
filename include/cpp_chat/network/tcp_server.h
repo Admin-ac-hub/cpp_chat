@@ -17,8 +17,8 @@ public:
     void stop();
 
 private:
-    void setup_listener();
-    void run_event_loop();
+    bool setup_listener();
+    bool run_event_loop();
     void accept_connections();
     void handle_client_read(int client_fd);
     void close_client(int client_fd);

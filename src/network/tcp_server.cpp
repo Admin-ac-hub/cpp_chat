@@ -4,7 +4,6 @@
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
-#include <stdexcept>
 #include <string>
 #include <sys/epoll.h>
 #include <sys/socket.h>
@@ -22,15 +21,19 @@ std::string last_error(const std::string& action) {
     return action + ": " + std::strerror(errno);
 }
 
-void set_non_blocking(int fd) {
+bool set_non_blocking(int fd, logging::Logger& logger) {
     const int flags = fcntl(fd, F_GETFL, 0);
     if (flags == -1) {
-        throw std::runtime_error(last_error("fcntl(F_GETFL) failed"));
+        logger.error(last_error("fcntl(F_GETFL) failed"));
+        return false;
     }
 
     if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
-        throw std::runtime_error(last_error("fcntl(F_SETFL) failed"));
+        logger.error(last_error("fcntl(F_SETFL) failed"));
+        return false;
     }
+
+    return true;
 }
 
 } // namespace
@@ -43,10 +46,15 @@ TcpServer::~TcpServer() {
 }
 
 void TcpServer::start() {
-    running_ = true;
-    setup_listener();
+    if (!setup_listener()) {
+        stop();
+        return;
+    }
+
     logger_.info("tcp server listening on " + config_.host + ":" + std::to_string(config_.port));
+    running_ = true;
     run_event_loop();
+    stop();
 }
 
 void TcpServer::stop() {
@@ -69,48 +77,59 @@ void TcpServer::stop() {
     }
 }
 
-void TcpServer::setup_listener() {
+bool TcpServer::setup_listener() {
     listen_fd_ = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd_ == -1) {
-        throw std::runtime_error(last_error("socket failed"));
+        logger_.error(last_error("socket failed"));
+        return false;
     }
 
     const int enabled = 1;
     if (setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &enabled, sizeof(enabled)) == -1) {
-        throw std::runtime_error(last_error("setsockopt(SO_REUSEADDR) failed"));
+        logger_.error(last_error("setsockopt(SO_REUSEADDR) failed"));
+        return false;
     }
 
     sockaddr_in address{};
     address.sin_family = AF_INET;
     address.sin_port = htons(config_.port);
     if (inet_pton(AF_INET, config_.host.c_str(), &address.sin_addr) != 1) {
-        throw std::runtime_error("invalid listen host: " + config_.host);
+        logger_.error("invalid listen host: " + config_.host);
+        return false;
     }
 
     if (bind(listen_fd_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == -1) {
-        throw std::runtime_error(last_error("bind failed"));
+        logger_.error(last_error("bind failed"));
+        return false;
     }
 
     if (listen(listen_fd_, kBacklog) == -1) {
-        throw std::runtime_error(last_error("listen failed"));
+        logger_.error(last_error("listen failed"));
+        return false;
     }
 
-    set_non_blocking(listen_fd_);
+    if (!set_non_blocking(listen_fd_, logger_)) {
+        return false;
+    }
 
     epoll_fd_ = epoll_create1(EPOLL_CLOEXEC);
     if (epoll_fd_ == -1) {
-        throw std::runtime_error(last_error("epoll_create1 failed"));
+        logger_.error(last_error("epoll_create1 failed"));
+        return false;
     }
 
     epoll_event event{};
     event.events = EPOLLIN;
     event.data.fd = listen_fd_;
     if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, listen_fd_, &event) == -1) {
-        throw std::runtime_error(last_error("epoll_ctl listen fd failed"));
+        logger_.error(last_error("epoll_ctl listen fd failed"));
+        return false;
     }
+
+    return true;
 }
 
-void TcpServer::run_event_loop() {
+bool TcpServer::run_event_loop() {
     epoll_event events[kMaxEvents];
 
     while (running_) {
@@ -119,7 +138,8 @@ void TcpServer::run_event_loop() {
             if (errno == EINTR) {
                 continue;
             }
-            throw std::runtime_error(last_error("epoll_wait failed"));
+            logger_.error(last_error("epoll_wait failed"));
+            return false;
         }
 
         for (int i = 0; i < ready_count; ++i) {
@@ -139,6 +159,8 @@ void TcpServer::run_event_loop() {
             }
         }
     }
+
+    return true;
 }
 
 void TcpServer::accept_connections() {
@@ -155,7 +177,8 @@ void TcpServer::accept_connections() {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 return;
             }
-            throw std::runtime_error(last_error("accept4 failed"));
+            logger_.warn(last_error("accept4 failed"));
+            return;
         }
 
         char peer_ip[INET_ADDRSTRLEN] = {};
@@ -168,8 +191,9 @@ void TcpServer::accept_connections() {
         event.events = EPOLLIN | EPOLLRDHUP;
         event.data.fd = client_fd;
         if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, client_fd, &event) == -1) {
+            logger_.warn(last_error("epoll_ctl client fd failed"));
             close(client_fd);
-            throw std::runtime_error(last_error("epoll_ctl client fd failed"));
+            continue;
         }
     }
 }
