@@ -17,7 +17,6 @@ public:
     void stop();
 
 private:
-#ifdef __linux__
     void setup_listener();
     void run_event_loop();
     void accept_connections();
@@ -26,7 +25,6 @@ private:
 
     int listen_fd_ = -1;
     int epoll_fd_ = -1;
-#endif
 
     const core::ServerConfig& config_;
     logging::Logger& logger_;

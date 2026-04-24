@@ -38,9 +38,8 @@ cmake --build build
 ./build/cpp_chat_server
 ```
 
-The current TCP server implementation uses Linux `epoll`. On Linux it listens
-on `0.0.0.0:9000` and echoes received bytes back to the client. On non-Linux
-platforms the binary builds, but the server logs that `epoll` is unavailable.
+The current TCP server implementation targets Linux and uses `epoll`. It listens
+on `0.0.0.0:9000` and echoes received bytes back to the client.
 
 Quick manual test on Linux:
 

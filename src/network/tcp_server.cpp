@@ -1,6 +1,5 @@
 #include "cpp_chat/network/tcp_server.h"
 
-#ifdef __linux__
 #include <arpa/inet.h>
 #include <cerrno>
 #include <cstring>
@@ -10,11 +9,9 @@
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#endif
 
 namespace cpp_chat::network {
 
-#ifdef __linux__
 namespace {
 
 constexpr int kBacklog = 128;
@@ -37,7 +34,6 @@ void set_non_blocking(int fd) {
 }
 
 } // namespace
-#endif
 
 TcpServer::TcpServer(const core::ServerConfig& config, logging::Logger& logger)
     : config_(config), logger_(logger) {}
@@ -47,26 +43,17 @@ TcpServer::~TcpServer() {
 }
 
 void TcpServer::start() {
-#ifndef __linux__
-    logger_.error("epoll server requires Linux; current platform does not provide epoll");
-#else
     running_ = true;
     setup_listener();
     logger_.info("tcp server listening on " + config_.host + ":" + std::to_string(config_.port));
     run_event_loop();
-#endif
 }
 
 void TcpServer::stop() {
-#ifdef __linux__
     const bool had_resources = running_ || epoll_fd_ != -1 || listen_fd_ != -1;
-#else
-    const bool had_resources = running_;
-#endif
 
     running_ = false;
 
-#ifdef __linux__
     if (epoll_fd_ != -1) {
         close(epoll_fd_);
         epoll_fd_ = -1;
@@ -76,14 +63,12 @@ void TcpServer::stop() {
         close(listen_fd_);
         listen_fd_ = -1;
     }
-#endif
 
     if (had_resources) {
         logger_.info("tcp server stopped");
     }
 }
 
-#ifdef __linux__
 void TcpServer::setup_listener() {
     listen_fd_ = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd_ == -1) {
@@ -225,6 +210,5 @@ void TcpServer::close_client(int client_fd) {
     close(client_fd);
     logger_.info("client disconnected fd=" + std::to_string(client_fd));
 }
-#endif
 
 } // namespace cpp_chat::network
