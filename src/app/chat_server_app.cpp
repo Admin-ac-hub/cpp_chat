@@ -5,7 +5,7 @@ namespace cpp_chat::app {
 ChatServerApp::ChatServerApp(core::ServerConfig config)
     : config_(std::move(config)),
       chat_service_(session_manager_, message_store_, logger_),
-      tcp_server_(config_, logger_) {}
+      tcp_server_(config_, chat_service_, logger_) {}
 
 int ChatServerApp::run() {
     logger_.info("starting chat server");
@@ -15,4 +15,3 @@ int ChatServerApp::run() {
 }
 
 } // namespace cpp_chat::app
-

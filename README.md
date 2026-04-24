@@ -47,6 +47,30 @@ Quick manual test on Linux:
 nc 127.0.0.1 9000
 ```
 
+Minimal single-chat protocol:
+
+```text
+LOGIN <user_id> <username>
+DM <receiver_id> <message>
+```
+
+Example with two clients:
+
+```text
+# client A
+LOGIN 1 alice
+DM 2 hello
+
+# client B
+LOGIN 2 bob
+```
+
+If user `2` is online, client B receives:
+
+```text
+FROM 1 hello
+```
+
 ## Current Modules
 
 - `app`: application composition and lifecycle.

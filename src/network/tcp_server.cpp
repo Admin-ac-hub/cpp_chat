@@ -1,10 +1,13 @@
 #include "cpp_chat/network/tcp_server.h"
 
+#include "cpp_chat/chat/chat_service.h"
+
 #include <arpa/inet.h>
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
 #include <string>
+#include <vector>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -38,8 +41,10 @@ bool set_non_blocking(int fd, logging::Logger& logger) {
 
 } // namespace
 
-TcpServer::TcpServer(const core::ServerConfig& config, logging::Logger& logger)
-    : config_(config), logger_(logger) {}
+TcpServer::TcpServer(const core::ServerConfig& config,
+                     chat::ChatService& chat_service,
+                     logging::Logger& logger)
+    : config_(config), chat_service_(chat_service), logger_(logger) {}
 
 TcpServer::~TcpServer() {
     stop();
@@ -220,16 +225,71 @@ void TcpServer::handle_client_read(int client_fd) {
         logger_.info("received " + std::to_string(bytes_read) +
                      " bytes from fd=" + std::to_string(client_fd));
 
-        const ssize_t bytes_sent = send(client_fd, buffer, static_cast<std::size_t>(bytes_read), MSG_NOSIGNAL);
-        if (bytes_sent == -1) {
-            logger_.warn(last_error("send failed"));
-            close_client(client_fd);
-            return;
+        auto& read_buffer = read_buffers_[client_fd];
+        read_buffer.append(buffer, static_cast<std::size_t>(bytes_read));
+
+        std::vector<std::string> lines;
+        std::size_t newline_pos = read_buffer.find('\n');
+        while (newline_pos != std::string::npos) {
+            lines.push_back(read_buffer.substr(0, newline_pos));
+            read_buffer.erase(0, newline_pos + 1);
+            newline_pos = read_buffer.find('\n');
+        }
+
+        for (const auto& line : lines) {
+            if (!handle_client_line(client_fd, line)) {
+                return;
+            }
         }
     }
 }
 
+bool TcpServer::handle_client_line(int client_fd, const std::string& line) {
+    const auto outbound_messages = chat_service_.handle_client_line(
+        static_cast<ConnectionId>(client_fd),
+        line);
+
+    for (const auto& message : outbound_messages) {
+        const auto target_fd = static_cast<int>(message.connection_id);
+        if (!send_to_client(target_fd, message.data)) {
+            close_client(target_fd);
+            if (target_fd == client_fd) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+bool TcpServer::send_to_client(int client_fd, const std::string& data) {
+    std::size_t total_sent = 0;
+    while (total_sent < data.size()) {
+        const ssize_t bytes_sent = send(
+            client_fd,
+            data.data() + total_sent,
+            data.size() - total_sent,
+            MSG_NOSIGNAL);
+
+        if (bytes_sent == -1) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                logger_.warn("send would block fd=" + std::to_string(client_fd));
+                return false;
+            }
+
+            logger_.warn(last_error("send failed"));
+            return false;
+        }
+
+        total_sent += static_cast<std::size_t>(bytes_sent);
+    }
+
+    return true;
+}
+
 void TcpServer::close_client(int client_fd) {
+    chat_service_.handle_disconnect(static_cast<ConnectionId>(client_fd));
+    read_buffers_.erase(client_fd);
     epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, client_fd, nullptr);
     close(client_fd);
     logger_.info("client disconnected fd=" + std::to_string(client_fd));
