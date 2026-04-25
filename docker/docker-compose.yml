@@ -1,0 +1,42 @@
+name: cpp_chat
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: cpp_chat_mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: cpp_chat
+      MYSQL_USER: cpp_chat
+      MYSQL_PASSWORD: cpp_chat
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ../sql/mysql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ../sql/mysql/create_user.sql:/docker-entrypoint-initdb.d/02-create_user.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: cpp_chat_server
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      CPP_CHAT_LOG_DB_HOST: mysql
+      CPP_CHAT_LOG_DB_PORT: 3306
+      CPP_CHAT_LOG_DB_USER: cpp_chat
+      CPP_CHAT_LOG_DB_PASSWORD: cpp_chat
+      CPP_CHAT_LOG_DB_NAME: cpp_chat
+    ports:
+      - "9000:9000"
+
+volumes:
+  mysql_data:

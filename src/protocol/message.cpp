@@ -5,13 +5,13 @@
 namespace cpp_chat::protocol {
 
 namespace {
-
+//去掉\r
 void trim_trailing_cr(std::string& value) {
     if (!value.empty() && value.back() == '\r') {
         value.pop_back();
     }
 }
-
+//去掉开头空格
 void trim_leading_space(std::string& value) {
     while (!value.empty() && value.front() == ' ') {
         value.erase(value.begin());

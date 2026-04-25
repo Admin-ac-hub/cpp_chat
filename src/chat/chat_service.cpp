@@ -17,6 +17,8 @@ std::vector<OutboundMessage> ChatService::handle_client_line(network::Connection
     protocol::ClientCommand command;
     std::string error;
     if (!protocol::parse_client_command(line, command, error)) {
+        logger_.warn("invalid client command connection_id=" + std::to_string(connection_id) +
+                     " error=" + error);
         return {{connection_id, protocol::format_error(error)}};
     }
 
@@ -34,6 +36,8 @@ std::vector<OutboundMessage> ChatService::handle_client_line(network::Connection
     if (command.type == protocol::MessageType::DirectChat) {
         const auto sender = sessions_.find_by_connection(connection_id);
         if (!sender.has_value()) {
+            logger_.warn("direct message rejected because login is required connection_id=" +
+                         std::to_string(connection_id));
             return {{connection_id, protocol::format_error("login required")}};
         }
 
@@ -60,6 +64,8 @@ std::vector<OutboundMessage> ChatService::handle_client_line(network::Connection
         };
     }
 
+    logger_.warn("unsupported command type=" + protocol::to_string(command.type) +
+                 " connection_id=" + std::to_string(connection_id));
     return {{connection_id, protocol::format_error("unsupported command")}};
 }
 

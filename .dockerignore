@@ -1,0 +1,13 @@
+.git
+build
+build-linux
+cmake-build-*
+CMakeFiles
+CMakeCache.txt
+Makefile
+compile_commands.json
+logs
+*.log
+.DS_Store
+.idea
+.vscode
