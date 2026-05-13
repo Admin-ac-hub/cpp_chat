@@ -1,6 +1,7 @@
 name: cpp_chat
 
 services:
+  # MySQL 保存服务端日志和聊天消息。
   mysql:
     image: mysql:8.4
     container_name: cpp_chat_mysql
@@ -12,17 +13,22 @@ services:
     ports:
       - "3306:3306"
     volumes:
+      # 使用命名卷持久化数据库数据，容器重建后日志不会丢失。
       - mysql_data:/var/lib/mysql
+      # 初始化数据库结构和访问账号，脚本只在 MySQL 首次初始化数据目录时执行。
       - ../sql/mysql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
       - ../sql/mysql/create_user.sql:/docker-entrypoint-initdb.d/02-create_user.sql:ro
     healthcheck:
+      # app 服务依赖该健康检查，避免 MySQL 尚未就绪时服务端立即连接失败。
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
       interval: 5s
       timeout: 3s
       retries: 20
 
+  # C++ 聊天服务端。
   app:
     build:
+      # 从仓库根目录构建，使 Dockerfile 能复制完整项目文件。
       context: ..
       dockerfile: docker/Dockerfile
     container_name: cpp_chat_server
@@ -30,13 +36,16 @@ services:
       mysql:
         condition: service_healthy
     environment:
+      # 容器内通过服务名 mysql 访问同一个 compose 网络里的数据库。
       CPP_CHAT_LOG_DB_HOST: mysql
       CPP_CHAT_LOG_DB_PORT: 3306
       CPP_CHAT_LOG_DB_USER: cpp_chat
       CPP_CHAT_LOG_DB_PASSWORD: cpp_chat
       CPP_CHAT_LOG_DB_NAME: cpp_chat
+      CPP_CHAT_DB_POOL_SIZE: 4
     ports:
       - "9000:9000"
 
 volumes:
+  # MySQL 数据卷，由 Docker 管理生命周期。
   mysql_data:

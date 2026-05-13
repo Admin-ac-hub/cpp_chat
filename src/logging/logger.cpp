@@ -13,6 +13,7 @@ namespace cpp_chat::logging {
 
 namespace {
 
+// 把枚举日志级别转换为数据库和控制台中使用的文本。
 const char* level_to_string(LogLevel level) {
     switch (level) {
         case LogLevel::Info:
@@ -25,11 +26,13 @@ const char* level_to_string(LogLevel level) {
     return "UNKNOWN";
 }
 
+// 生成本地时区时间戳，用于控制台日志前缀。
 std::string current_timestamp() {
     const auto now = std::chrono::system_clock::now();
     const auto now_time = std::chrono::system_clock::to_time_t(now);
 
     std::tm local_time{};
+    // localtime_r 是线程安全版本，避免静态 tm 缓冲被并发覆盖。
     localtime_r(&now_time, &local_time);
 
     std::ostringstream output;
@@ -37,33 +40,22 @@ std::string current_timestamp() {
     return output.str();
 }
 
+// 对简单 SQL 语句做一层包装，让构造函数的错误处理更清晰。
 bool execute_query(MYSQL* mysql, const char* query) {
     return mysql_query(mysql, query) == 0;
 }
 
 } // namespace
 
-Logger::Logger(MySqlLogConfig config) : config_(std::move(config)) {
-    mysql_ = mysql_init(nullptr);
-    if (mysql_ == nullptr) {
-        std::cerr << "[ERROR] mysql_init failed" << std::endl;
+Logger::Logger(storage::MySqlConnectionPool& pool) : pool_(&pool) {
+    auto connection = pool_->acquire();
+    if (!connection) {
+        std::cerr << "[ERROR] Logger: failed to acquire MySQL connection" << std::endl;
         return;
     }
+    MYSQL* mysql = connection.get();
 
-    if (mysql_real_connect(mysql_,
-                           config_.host.c_str(),
-                           config_.user.c_str(),
-                           config_.password.c_str(),
-                           config_.database.c_str(),
-                           config_.port,
-                           nullptr,
-                           0) == nullptr) {
-        std::cerr << "[ERROR] failed to connect MySQL logger: " << mysql_error(mysql_) << std::endl;
-        mysql_close(mysql_);
-        mysql_ = nullptr;
-        return;
-    }
-
+    // 日志表在启动时自动创建，部署时只需要保证库和用户存在。
     const char* create_table =
         "CREATE TABLE IF NOT EXISTS server_logs ("
         "id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,"
@@ -72,17 +64,8 @@ Logger::Logger(MySqlLogConfig config) : config_(std::move(config)) {
         "message TEXT NOT NULL"
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
 
-    if (!execute_query(mysql_, create_table)) {
-        std::cerr << "[ERROR] failed to create MySQL log table: " << mysql_error(mysql_) << std::endl;
-        mysql_close(mysql_);
-        mysql_ = nullptr;
-    }
-}
-
-Logger::~Logger() {
-    if (mysql_ != nullptr) {
-        mysql_close(mysql_);
-        mysql_ = nullptr;
+    if (!execute_query(mysql, create_table)) {
+        std::cerr << "[ERROR] failed to create MySQL log table: " << mysql_error(mysql) << std::endl;
     }
 }
 
@@ -99,17 +82,26 @@ void Logger::error(const std::string& message) {
 }
 
 void Logger::write(LogLevel level, const std::string& message) {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     const char* level_name = level_to_string(level);
     const std::string line = current_timestamp() + " [" + level_name + "] " + message;
-    std::cout << line << std::endl;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::cout << line << std::endl;
+    }
 
-    if (mysql_ == nullptr) {
+    // 数据库不可用时直接退化为控制台日志，不影响主业务流程。
+    if (pool_ == nullptr) {
         return;
     }
 
-    MYSQL_STMT* statement = mysql_stmt_init(mysql_);
+    auto connection = pool_->acquire();
+    if (!connection) {
+        return;
+    }
+    MYSQL* mysql = connection.get();
+
+    // 使用预处理语句写日志，避免 message 中包含引号等字符时破坏 SQL。
+    MYSQL_STMT* statement = mysql_stmt_init(mysql);
     if (statement == nullptr) {
         std::cerr << "[ERROR] mysql_stmt_init failed" << std::endl;
         return;
@@ -127,11 +119,13 @@ void Logger::write(LogLevel level, const std::string& message) {
     unsigned long level_length = static_cast<unsigned long>(std::strlen(level_name));
     unsigned long message_length = static_cast<unsigned long>(message.size());
 
+    // 第一个参数绑定日志级别字符串。
     bind[0].buffer_type = MYSQL_TYPE_STRING;
     bind[0].buffer = const_cast<char*>(level_name);
     bind[0].buffer_length = level_length;
     bind[0].length = &level_length;
 
+    // 第二个参数绑定日志正文，允许包含任意普通文本。
     bind[1].buffer_type = MYSQL_TYPE_STRING;
     bind[1].buffer = const_cast<char*>(message.data());
     bind[1].buffer_length = message_length;

@@ -9,8 +9,10 @@ namespace cpp_chat::core {
 
 namespace {
 
+// 默认配置文件路径，相对当前工作目录读取。
 constexpr const char* kDefaultMySqlConfigFile = "config/mysql.env";
 
+// 去掉配置文件键和值两侧的空白字符。
 std::string trim(std::string value) {
     const auto first = value.find_first_not_of(" \t\r\n");
     if (first == std::string::npos) {
@@ -21,6 +23,9 @@ std::string trim(std::string value) {
     return value.substr(first, last - first + 1);
 }
 
+// 读取 KEY=VALUE 格式配置文件。
+//
+// 空行、注释行和没有 '=' 的行会被忽略，避免配置文件中的说明文字影响启动。
 std::unordered_map<std::string, std::string> load_env_file(const std::string& path) {
     std::unordered_map<std::string, std::string> values;
     std::ifstream input(path);
@@ -50,6 +55,7 @@ std::unordered_map<std::string, std::string> load_env_file(const std::string& pa
     return values;
 }
 
+// 从配置文件结果中读取值；缺失或空值时保留默认值。
 std::string get_file_value_or_default(const std::unordered_map<std::string, std::string>& values,
                                       const std::string& name,
                                       std::string default_value) {
@@ -60,6 +66,7 @@ std::string get_file_value_or_default(const std::unordered_map<std::string, std:
     return it->second;
 }
 
+// 从真实环境变量读取值；环境变量优先级高于配置文件。
 std::string get_env_or_default(const char* name, std::string default_value) {
     const char* value = std::getenv(name);
     if (value == nullptr || value[0] == '\0') {
@@ -68,6 +75,7 @@ std::string get_env_or_default(const char* name, std::string default_value) {
     return value;
 }
 
+// 端口必须在 1-65535 范围内；解析失败时回退默认值。
 std::uint16_t parse_port_or_default(const std::string& value, std::uint16_t default_value) {
     if (value.empty()) {
         return default_value;
@@ -84,6 +92,7 @@ std::uint16_t parse_port_or_default(const std::string& value, std::uint16_t defa
     return default_value;
 }
 
+// 环境变量版本的端口读取，复用统一的范围校验。
 std::uint16_t get_env_port_or_default(const char* name, std::uint16_t default_value) {
     const char* value = std::getenv(name);
     if (value == nullptr || value[0] == '\0') {
@@ -93,28 +102,76 @@ std::uint16_t get_env_port_or_default(const char* name, std::uint16_t default_va
     return parse_port_or_default(value, default_value);
 }
 
+int parse_positive_int_or_default(const std::string& value, int default_value) {
+    if (value.empty()) {
+        return default_value;
+    }
+
+    try {
+        const int parsed = std::stoi(value);
+        if (parsed > 0) {
+            return parsed;
+        }
+    } catch (...) {
+    }
+
+    return default_value;
+}
+
+int get_env_positive_int_or_default(const char* name, int default_value) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return default_value;
+    }
+
+    return parse_positive_int_or_default(value, default_value);
+}
+
 } // namespace
 
 ServerConfig load_default_config() {
     ServerConfig config;
+    // 先读取文件配置，再读取环境变量，使环境变量适合容器和部署时覆盖。
     const auto file_values = load_env_file(kDefaultMySqlConfigFile);
 
+    // 文件配置覆盖结构体默认值。
+    config.log_db_host = get_file_value_or_default(
+        file_values, "CPP_CHAT_DB_HOST", config.log_db_host);
     config.log_db_host = get_file_value_or_default(
         file_values, "CPP_CHAT_LOG_DB_HOST", config.log_db_host);
     config.log_db_port = parse_port_or_default(
+        get_file_value_or_default(file_values, "CPP_CHAT_DB_PORT", ""), config.log_db_port);
+    config.log_db_port = parse_port_or_default(
         get_file_value_or_default(file_values, "CPP_CHAT_LOG_DB_PORT", ""), config.log_db_port);
+    config.log_db_user = get_file_value_or_default(
+        file_values, "CPP_CHAT_DB_USER", config.log_db_user);
     config.log_db_user = get_file_value_or_default(
         file_values, "CPP_CHAT_LOG_DB_USER", config.log_db_user);
     config.log_db_password = get_file_value_or_default(
+        file_values, "CPP_CHAT_DB_PASSWORD", config.log_db_password);
+    config.log_db_password = get_file_value_or_default(
         file_values, "CPP_CHAT_LOG_DB_PASSWORD", config.log_db_password);
     config.log_db_name = get_file_value_or_default(
+        file_values, "CPP_CHAT_DB_NAME", config.log_db_name);
+    config.log_db_name = get_file_value_or_default(
         file_values, "CPP_CHAT_LOG_DB_NAME", config.log_db_name);
+    config.db_pool_size = parse_positive_int_or_default(
+        get_file_value_or_default(file_values, "CPP_CHAT_DB_POOL_SIZE", ""),
+        config.db_pool_size);
 
+    // 环境变量拥有最高优先级，方便在不改文件的情况下切换数据库。
+    config.log_db_host = get_env_or_default("CPP_CHAT_DB_HOST", config.log_db_host);
     config.log_db_host = get_env_or_default("CPP_CHAT_LOG_DB_HOST", config.log_db_host);
+    config.log_db_port = get_env_port_or_default("CPP_CHAT_DB_PORT", config.log_db_port);
     config.log_db_port = get_env_port_or_default("CPP_CHAT_LOG_DB_PORT", config.log_db_port);
+    config.log_db_user = get_env_or_default("CPP_CHAT_DB_USER", config.log_db_user);
     config.log_db_user = get_env_or_default("CPP_CHAT_LOG_DB_USER", config.log_db_user);
+    config.log_db_password = get_env_or_default("CPP_CHAT_DB_PASSWORD", config.log_db_password);
     config.log_db_password = get_env_or_default("CPP_CHAT_LOG_DB_PASSWORD", config.log_db_password);
+    config.log_db_name = get_env_or_default("CPP_CHAT_DB_NAME", config.log_db_name);
     config.log_db_name = get_env_or_default("CPP_CHAT_LOG_DB_NAME", config.log_db_name);
+    config.db_pool_size = get_env_positive_int_or_default(
+        "CPP_CHAT_DB_POOL_SIZE", config.db_pool_size);
     return config;
 }
 
