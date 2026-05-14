@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -89,6 +90,11 @@ void TcpServer::stop() {
         epoll_fd_ = -1;
     }
 
+    if (wake_fd_ != -1) {
+        close(wake_fd_);
+        wake_fd_ = -1;
+    }
+
     if (listen_fd_ != -1) {
         close(listen_fd_);
         listen_fd_ = -1;
@@ -144,6 +150,20 @@ bool TcpServer::setup_listener() {
         return false;
     }
 
+    wake_fd_ = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (wake_fd_ == -1) {
+        logger_.error(last_error("eventfd failed"));
+        return false;
+    }
+
+    epoll_event wake_event{};
+    wake_event.events = EPOLLIN | EPOLLET;
+    wake_event.data.fd = wake_fd_;
+    if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, wake_fd_, &wake_event) == -1) {
+        logger_.error(last_error("epoll_ctl wake fd failed"));
+        return false;
+    }
+
     epoll_event event{};
     event.events = EPOLLIN | EPOLLET;
     event.data.fd = listen_fd_;
@@ -182,6 +202,12 @@ bool TcpServer::run_event_loop() {
             if (fd == listen_fd_) {
                 // 监听 fd 的读事件代表有一个或多个连接等待 accept。
                 accept_connections();
+                continue;
+            }
+
+            if (fd == wake_fd_) {
+                drain_wake_events();
+                drain_responses();
                 continue;
             }
 
@@ -326,22 +352,24 @@ void TcpServer::process_packet_async(ConnectionId connection_id,
         payload);
 
     // 业务层响应推入线程安全队列，由网络线程统一写回。
-    std::lock_guard<std::mutex> lock(response_mutex_);
-    if (response_queue_.size() + outbound_messages.size() >
-        static_cast<std::size_t>(config_.max_response_queue_size)) {
-        logger_.warn("response queue overflow connection_id=" + std::to_string(connection_id));
-        close_queue_.push_back({connection_id, generation});
-        return;
+    {
+        std::lock_guard<std::mutex> lock(response_mutex_);
+        if (response_queue_.size() + outbound_messages.size() >
+            static_cast<std::size_t>(config_.max_response_queue_size)) {
+            logger_.warn("response queue overflow connection_id=" + std::to_string(connection_id));
+            close_queue_.push_back({connection_id, generation});
+        } else {
+            for (const auto& message : outbound_messages) {
+                response_queue_.push_back({
+                    message.connection_id,
+                    message.connection_id == connection_id ? generation : 0,
+                    message.data,
+                    message.close_after_send,
+                });
+            }
+        }
     }
-
-    for (const auto& message : outbound_messages) {
-        response_queue_.push_back({
-            message.connection_id,
-            message.connection_id == connection_id ? generation : 0,
-            message.data,
-            message.close_after_send,
-        });
-    }
+    wake_event_loop();
 }
 
 void TcpServer::drain_responses() {
@@ -387,6 +415,44 @@ void TcpServer::drain_close_requests() {
         if (is_current_connection(request.connection_id, request.generation)) {
             close_connection(request.connection_id);
         }
+    }
+}
+
+void TcpServer::drain_wake_events() {
+    std::uint64_t value = 0;
+    while (true) {
+        const ssize_t n = read(wake_fd_, &value, sizeof(value));
+        if (n == static_cast<ssize_t>(sizeof(value))) {
+            continue;
+        }
+        if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            return;
+        }
+        if (n == -1 && errno == EINTR) {
+            continue;
+        }
+        return;
+    }
+}
+
+void TcpServer::wake_event_loop() {
+    if (wake_fd_ == -1) {
+        return;
+    }
+
+    const std::uint64_t value = 1;
+    while (true) {
+        const ssize_t n = write(wake_fd_, &value, sizeof(value));
+        if (n == static_cast<ssize_t>(sizeof(value))) {
+            return;
+        }
+        if (n == -1 && errno == EINTR) {
+            continue;
+        }
+        if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            return;
+        }
+        return;
     }
 }
 

@@ -76,6 +76,8 @@ private:
     // 由网络线程调用：将 response_queue_ 中所有待发送响应写回各连接。
     void drain_responses();
     void drain_close_requests();
+    void drain_wake_events();
+    void wake_event_loop();
 
     ConnectionState* find_connection_by_fd(int fd);
     ConnectionState* find_connection(ConnectionId connection_id);
@@ -89,6 +91,7 @@ private:
 
     int listen_fd_ = -1;
     int epoll_fd_ = -1;
+    int wake_fd_ = -1;
 
     const core::ServerConfig& config_;
     chat::ChatService& chat_service_;
