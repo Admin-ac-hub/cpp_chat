@@ -4,6 +4,8 @@
 #include "cpp_chat/network/connection.h"
 #include "cpp_chat/protocol/message.h"
 #include "cpp_chat/session/session_manager.h"
+#include "cpp_chat/storage/group_store.h"
+#include "cpp_chat/storage/group_member_store.h"
 #include "cpp_chat/storage/message_store.h"
 #include "cpp_chat/storage/user_store.h"
 
@@ -33,14 +35,16 @@ public:
     ChatService(session::SessionManager& sessions,
                 storage::MessageStore& message_store,
                 storage::UserStore& user_store,
+                storage::GroupStore& group_store,
+                storage::GroupMemberStore& group_member_store,
                 logging::Logger& logger);
 
     // 直接处理一条已经构造好的消息，当前主要用于存储和日志记录。
     void handle_message(const protocol::Message& message);
 
-    // 处理客户端的一整行文本命令。
+    // 处理客户端的一个完整 JSON payload。
     //
-    // connection_id 用来识别命令来自哪个连接；line 不包含末尾换行。
+    // connection_id 用来识别命令来自哪个连接；payload 不包含长度前缀。
     // 返回值是需要写回 socket 的消息列表，网络层按 connection_id 分发。
     std::vector<OutboundMessage> handle_client_line(network::ConnectionId connection_id,
                                                     const std::string& line);
@@ -57,6 +61,12 @@ private:
 
     // 用户注册、登录和用户名/user_id 查询。
     storage::UserStore& user_store_;
+
+    // 群资料存储，负责 create_group 和群元信息查询。
+    storage::GroupStore& group_store_;
+
+    // 群成员关系权威存储，MySQL 模式下可跨服务重启恢复。
+    storage::GroupMemberStore& group_member_store_;
 
     // 统一日志入口，同时写 stdout 和 MySQL。
     logging::Logger& logger_;

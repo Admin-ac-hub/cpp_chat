@@ -1,10 +1,12 @@
 #include "cpp_chat/network/tcp_server.h"
 
 #include "cpp_chat/chat/chat_service.h"
+#include "cpp_chat/network/packet_codec.h"
 
 #include <arpa/inet.h>
 #include <cerrno>
 #include <cstring>
+#include <exception>
 #include <fcntl.h>
 #include <string>
 #include <vector>
@@ -18,7 +20,6 @@ namespace {
 
 constexpr int kBacklog = 128;
 constexpr int kMaxEvents = 64;
-constexpr int kBufferSize = 4096;
 
 // 将 errno 转成带上下文的日志文本，便于定位失败的系统调用。
 std::string last_error(const std::string& action) {
@@ -73,6 +74,15 @@ void TcpServer::stop() {
     const bool had_resources = running_ || epoll_fd_ != -1 || listen_fd_ != -1;
 
     running_ = false;
+
+    std::vector<ConnectionId> connection_ids;
+    connection_ids.reserve(connections_.size());
+    for (const auto& [connection_id, _] : connections_) {
+        connection_ids.push_back(connection_id);
+    }
+    for (const auto connection_id : connection_ids) {
+        close_connection(connection_id);
+    }
 
     if (epoll_fd_ != -1) {
         close(epoll_fd_);
@@ -135,7 +145,7 @@ bool TcpServer::setup_listener() {
     }
 
     epoll_event event{};
-    event.events = EPOLLIN;
+    event.events = EPOLLIN | EPOLLET;
     event.data.fd = listen_fd_;
     // 监听 fd 可读表示有新连接到来。
     if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, listen_fd_, &event) == -1) {
@@ -223,8 +233,10 @@ void TcpServer::accept_connections() {
                      " peer=" + std::string(peer_ip) + ":" +
                      std::to_string(ntohs(client_address.sin_port)));
 
+        const ConnectionId connection_id = next_connection_id_++;
+        const std::uint64_t generation = next_generation_++;
         epoll_event event{};
-        event.events = EPOLLIN | EPOLLRDHUP;
+        event.events = EPOLLIN | EPOLLRDHUP | EPOLLET;
         event.data.fd = client_fd;
         if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, client_fd, &event) == -1) {
             logger_.warn(last_error("epoll_ctl client fd failed"));
@@ -232,72 +244,100 @@ void TcpServer::accept_connections() {
             continue;
         }
 
-        last_activity_[client_fd] = std::time(nullptr);
+        ConnectionState connection;
+        connection.connection_id = connection_id;
+        connection.fd = client_fd;
+        connection.last_active_at = std::time(nullptr);
+        connection.generation = generation;
+        connection_by_fd_[client_fd] = connection_id;
+        connections_[connection_id] = std::move(connection);
+
+        logger_.info("connection assigned connection_id=" + std::to_string(connection_id) +
+                     " generation=" + std::to_string(generation) +
+                     " fd=" + std::to_string(client_fd));
     }
 }
 
 void TcpServer::handle_client_read(int client_fd) {
-    char buffer[kBufferSize];
+    auto* connection = find_connection_by_fd(client_fd);
+    if (connection == nullptr || connection->closing) {
+        return;
+    }
 
-    while (true) {
-        // 非阻塞 recv 循环读取，直到内核缓冲区暂时无数据。
-        const ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer), 0);
-        if (bytes_read == 0) {
-            // recv 返回 0 表示对端正常关闭连接。
-            close_client(client_fd);
-            return;
+    auto result = recv_packets_et(client_fd, connection->read_buffer, kMaxPacketPayloadSize);
+
+    if (result.status == RecvPacketStatus::Closed) {
+        close_client(client_fd);
+        return;
+    }
+
+    if (result.status == RecvPacketStatus::ProtocolError) {
+        logger_.warn("protocol error from fd=" + std::to_string(client_fd));
+        close_client(client_fd);
+        return;
+    }
+
+    if (result.status == RecvPacketStatus::IoError) {
+        errno = result.error_code;
+        logger_.warn(last_error("recv failed"));
+        close_client(client_fd);
+        return;
+    }
+
+    if (connection->read_buffer.size() >
+        static_cast<std::size_t>(config_.max_read_buffer_bytes)) {
+        logger_.warn("read buffer overflow connection_id=" +
+                     std::to_string(connection->connection_id) +
+                     " fd=" + std::to_string(client_fd));
+        close_client(client_fd);
+        return;
+    }
+
+    if (result.packets.empty()) {
+        return;
+    }
+
+    logger_.info("received " + std::to_string(result.packets.size()) +
+                 " packet(s) from connection_id=" + std::to_string(connection->connection_id) +
+                 " fd=" + std::to_string(client_fd));
+    // 更新心跳检查时间戳，防止被标记为空闲连接。
+    connection->last_active_at = std::time(nullptr);
+
+    // 将完整 payload 批量提交到线程池，同一批内的命令保证顺序执行。
+    // 跨批次的命令可能并发，但业务层通过 SessionManager 的互斥量保证一致性。
+    const auto connection_id = connection->connection_id;
+    const auto generation = connection->generation;
+    if (!thread_pool_.enqueue([this, connection_id, generation, packets = std::move(result.packets)]() {
+        for (const auto& packet : packets) {
+            process_packet_async(connection_id, generation, packet.payload);
         }
-
-        if (bytes_read == -1) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                // 当前可读数据已经全部取完，等待下一次 EPOLLIN。
-                return;
-            }
-            logger_.warn(last_error("recv failed"));
-            close_client(client_fd);
-            return;
-        }
-
-        logger_.info("received " + std::to_string(bytes_read) +
-                     " bytes from fd=" + std::to_string(client_fd));
-        // 更新心跳检查时间戳，防止被标记为空闲连接。
-        last_activity_[client_fd] = std::time(nullptr);
-
-        auto& read_buffer = read_buffers_[client_fd];
-        read_buffer.append(buffer, static_cast<std::size_t>(bytes_read));
-
-        // TCP 不保留消息边界，所以把累计缓冲按换行拆成完整命令。
-        // 最后一段没有换行的内容继续留在 read_buffer 里等待后续数据。
-        std::vector<std::string> lines;
-        std::size_t newline_pos = read_buffer.find('\n');
-        while (newline_pos != std::string::npos) {
-            lines.push_back(read_buffer.substr(0, newline_pos));
-            read_buffer.erase(0, newline_pos + 1);
-            newline_pos = read_buffer.find('\n');
-        }
-
-        // 将完整命令行批量提交到线程池，同一批内的命令保证顺序执行。
-        // 跨批次的命令可能并发，但业务层通过 SessionManager 的互斥量保证一致性。
-        if (!lines.empty()) {
-            thread_pool_.enqueue([this, client_fd, lines = std::move(lines)]() {
-                for (const auto& line : lines) {
-                    process_line_async(client_fd, line);
-                }
-            });
-        }
+    })) {
+        logger_.warn("thread pool queue full connection_id=" + std::to_string(connection_id) +
+                     " fd=" + std::to_string(client_fd));
+        close_client(client_fd);
     }
 }
 
-void TcpServer::process_line_async(int client_fd, const std::string& line) {
+void TcpServer::process_packet_async(ConnectionId connection_id,
+                                     std::uint64_t generation,
+                                     const std::string& payload) {
     const auto outbound_messages = chat_service_.handle_client_line(
-        static_cast<ConnectionId>(client_fd),
-        line);
+        connection_id,
+        payload);
 
     // 业务层响应推入线程安全队列，由网络线程统一写回。
     std::lock_guard<std::mutex> lock(response_mutex_);
+    if (response_queue_.size() + outbound_messages.size() >
+        static_cast<std::size_t>(config_.max_response_queue_size)) {
+        logger_.warn("response queue overflow connection_id=" + std::to_string(connection_id));
+        close_queue_.push_back({connection_id, generation});
+        return;
+    }
+
     for (const auto& message : outbound_messages) {
         response_queue_.push_back({
-            static_cast<int>(message.connection_id),
+            message.connection_id,
+            message.connection_id == connection_id ? generation : 0,
             message.data,
             message.close_after_send,
         });
@@ -305,6 +345,8 @@ void TcpServer::process_line_async(int client_fd, const std::string& line) {
 }
 
 void TcpServer::drain_responses() {
+    drain_close_requests();
+
     std::vector<QueuedResponse> pending;
     {
         std::lock_guard<std::mutex> lock(response_mutex_);
@@ -312,100 +354,147 @@ void TcpServer::drain_responses() {
     }
 
     for (const auto& response : pending) {
-        // 连接可能在业务处理期间被关闭，跳过已失效的 fd。
-        if (last_activity_.find(response.fd) == last_activity_.end()) {
+        auto* connection = find_connection(response.connection_id);
+        // 连接可能在业务处理期间被关闭，跳过已失效或已换代的连接。
+        if (connection == nullptr ||
+            !is_current_connection(response.connection_id, response.generation)) {
             continue;
         }
-        if (!send_to_client(response.fd, response.data)) {
-            close_client(response.fd);
+        if (!send_to_client(*connection, response.data)) {
+            close_connection(response.connection_id);
             continue;
         }
         if (response.close_after_send) {
-            if (write_buffers_.find(response.fd) == write_buffers_.end()) {
-                close_client(response.fd);
+            if (connection->write_buffer.empty()) {
+                close_connection(response.connection_id);
             } else {
-                close_after_write_.insert(response.fd);
+                connection->closing = true;
             }
+        }
+    }
+
+    drain_close_requests();
+}
+
+void TcpServer::drain_close_requests() {
+    std::vector<QueuedClose> pending;
+    {
+        std::lock_guard<std::mutex> lock(response_mutex_);
+        pending.swap(close_queue_);
+    }
+
+    for (const auto& request : pending) {
+        if (is_current_connection(request.connection_id, request.generation)) {
+            close_connection(request.connection_id);
         }
     }
 }
 
-bool TcpServer::send_to_client(int client_fd, const std::string& data) {
+ConnectionState* TcpServer::find_connection_by_fd(int fd) {
+    const auto id_it = connection_by_fd_.find(fd);
+    if (id_it == connection_by_fd_.end()) {
+        return nullptr;
+    }
+    return find_connection(id_it->second);
+}
+
+ConnectionState* TcpServer::find_connection(ConnectionId connection_id) {
+    const auto it = connections_.find(connection_id);
+    if (it == connections_.end()) {
+        return nullptr;
+    }
+    return &it->second;
+}
+
+bool TcpServer::is_current_connection(ConnectionId connection_id, std::uint64_t generation) const {
+    const auto it = connections_.find(connection_id);
+    if (it == connections_.end()) {
+        return false;
+    }
+    return generation == 0 || it->second.generation == generation;
+}
+
+bool TcpServer::send_to_client(ConnectionState& connection, const std::string& data) {
+    std::string packet;
+    try {
+        packet = encode_packet(data);
+    } catch (const std::exception& ex) {
+        logger_.warn("failed to encode packet: " + std::string(ex.what()));
+        return false;
+    }
+
     // 若已有未发完数据，直接追加到写缓冲，保持发送顺序。
-    auto& write_buffer = write_buffers_[client_fd];
-    if (!write_buffer.empty()) {
-        write_buffer += data;
+    if (!connection.write_buffer.empty()) {
+        connection.write_buffer += packet;
+        if (connection.write_buffer.size() >
+            static_cast<std::size_t>(config_.max_write_buffer_bytes)) {
+            logger_.warn("write buffer overflow connection_id=" +
+                         std::to_string(connection.connection_id) +
+                         " fd=" + std::to_string(connection.fd));
+            return false;
+        }
         return true;
     }
 
-    std::size_t total_sent = 0;
-    while (total_sent < data.size()) {
-        const ssize_t bytes_sent = send(
-            client_fd,
-            data.data() + total_sent,
-            data.size() - total_sent,
-            MSG_NOSIGNAL);
-
-        if (bytes_sent == -1) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                // 内核发送缓冲区满，将剩余数据写入应用层缓冲并监听可写事件。
-                write_buffer = data.substr(total_sent);
-                set_write_mode(client_fd, true);
-                return true;
-            }
-
-            logger_.warn(last_error("send failed"));
+    const auto result = send_all(connection.fd, packet.data(), packet.size());
+    if (result.status == SendStatus::WouldBlock) {
+        // 内核发送缓冲区满，将剩余数据写入应用层缓冲并监听可写事件。
+        connection.write_buffer = packet.substr(result.sent);
+        if (connection.write_buffer.size() >
+            static_cast<std::size_t>(config_.max_write_buffer_bytes)) {
+            logger_.warn("write buffer overflow connection_id=" +
+                         std::to_string(connection.connection_id) +
+                         " fd=" + std::to_string(connection.fd));
             return false;
         }
+        return set_write_mode(connection.fd, true);
+    }
 
-        total_sent += static_cast<std::size_t>(bytes_sent);
+    if (result.status == SendStatus::IoError) {
+        errno = result.error_code;
+        logger_.warn(last_error("send failed"));
+        return false;
     }
 
     return true;
 }
 
 void TcpServer::flush_write_buffer(int client_fd) {
-    auto it = write_buffers_.find(client_fd);
-    if (it == write_buffers_.end() || it->second.empty()) {
+    auto* connection = find_connection_by_fd(client_fd);
+    if (connection == nullptr || connection->write_buffer.empty()) {
         return;
     }
 
-    auto& buffer = it->second;
-    std::size_t total_sent = 0;
-    while (total_sent < buffer.size()) {
-        const ssize_t bytes_sent = send(
-            client_fd,
-            buffer.data() + total_sent,
-            buffer.size() - total_sent,
-            MSG_NOSIGNAL);
+    auto& buffer = connection->write_buffer;
+    const auto result = send_all(client_fd, buffer.data(), buffer.size());
+    if (result.status == SendStatus::WouldBlock) {
+        // 仍未可写，丢弃已发送前缀，保留剩余数据等待下次 EPOLLOUT。
+        buffer.erase(0, result.sent);
+        return;
+    }
 
-        if (bytes_sent == -1) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                // 仍未可写，丢弃已发送前缀，保留剩余数据等待下次 EPOLLOUT。
-                buffer.erase(0, total_sent);
-                return;
-            }
-
-            logger_.warn(last_error("send failed during flush"));
-            close_client(client_fd);
-            return;
-        }
-
-        total_sent += static_cast<std::size_t>(bytes_sent);
+    if (result.status == SendStatus::IoError) {
+        errno = result.error_code;
+        logger_.warn(last_error("send failed during flush"));
+        close_connection(connection->connection_id);
+        return;
     }
 
     // 全部发送完毕，清除缓冲并取消 EPOLLOUT 监听。
-    write_buffers_.erase(it);
-    set_write_mode(client_fd, false);
-    if (close_after_write_.erase(client_fd) > 0) {
-        close_client(client_fd);
+    buffer.clear();
+    if (!set_write_mode(client_fd, false)) {
+        close_connection(connection->connection_id);
+        return;
+    }
+    if (connection->closing) {
+        close_connection(connection->connection_id);
     }
 }
 
 bool TcpServer::set_write_mode(int client_fd, bool enable) {
     epoll_event event{};
     event.data.fd = client_fd;
-    event.events = EPOLLIN | EPOLLRDHUP;
+    event.events = EPOLLIN | EPOLLRDHUP | EPOLLET;
     if (enable) {
         event.events |= EPOLLOUT;
     }
@@ -419,17 +508,34 @@ bool TcpServer::set_write_mode(int client_fd, bool enable) {
 }
 
 void TcpServer::close_client(int client_fd) {
+    const auto id_it = connection_by_fd_.find(client_fd);
+    if (id_it == connection_by_fd_.end()) {
+        epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, client_fd, nullptr);
+        close(client_fd);
+        return;
+    }
+    close_connection(id_it->second);
+}
+
+void TcpServer::close_connection(ConnectionId connection_id) {
+    auto it = connections_.find(connection_id);
+    if (it == connections_.end()) {
+        return;
+    }
+
+    const int client_fd = it->second.fd;
+    const auto generation = it->second.generation;
     // 先通知业务层清理会话，再释放网络层保存的半包缓冲、写缓冲和心跳时间戳。
-    chat_service_.handle_disconnect(static_cast<ConnectionId>(client_fd));
-    read_buffers_.erase(client_fd);
-    write_buffers_.erase(client_fd);
-    last_activity_.erase(client_fd);
-    close_after_write_.erase(client_fd);
+    chat_service_.handle_disconnect(connection_id);
+    connection_by_fd_.erase(client_fd);
+    connections_.erase(it);
 
     // 即使 fd 已经异常，删除 epoll 监听失败也不影响后续 close，因此忽略返回值。
     epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, client_fd, nullptr);
     close(client_fd);
-    logger_.info("client disconnected fd=" + std::to_string(client_fd));
+    logger_.info("client disconnected connection_id=" + std::to_string(connection_id) +
+                 " generation=" + std::to_string(generation) +
+                 " fd=" + std::to_string(client_fd));
 }
 
 void TcpServer::check_heartbeats() {
@@ -437,17 +543,17 @@ void TcpServer::check_heartbeats() {
     const auto timeout = static_cast<std::time_t>(config_.heartbeat_timeout_seconds);
 
     // 收集超时 fd 后再关闭，避免在遍历中修改 map。
-    std::vector<int> timed_out;
-    for (const auto& [fd, last_time] : last_activity_) {
-        if (now - last_time > timeout) {
-            timed_out.push_back(fd);
+    std::vector<ConnectionId> timed_out;
+    for (const auto& [connection_id, connection] : connections_) {
+        if (now - connection.last_active_at > timeout) {
+            timed_out.push_back(connection_id);
         }
     }
 
-    for (const int fd : timed_out) {
-        logger_.info("heartbeat timeout fd=" + std::to_string(fd) +
+    for (const auto connection_id : timed_out) {
+        logger_.info("heartbeat timeout connection_id=" + std::to_string(connection_id) +
                      " closing connection");
-        close_client(fd);
+        close_connection(connection_id);
     }
 }
 

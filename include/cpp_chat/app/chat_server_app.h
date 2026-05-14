@@ -6,6 +6,8 @@
 #include "cpp_chat/logging/logger.h"
 #include "cpp_chat/network/tcp_server.h"
 #include "cpp_chat/session/session_manager.h"
+#include "cpp_chat/storage/group_member_store.h"
+#include "cpp_chat/storage/group_store.h"
 #include "cpp_chat/storage/message_store.h"
 #include "cpp_chat/storage/mysql_connection_pool.h"
 #include "cpp_chat/storage/user_store.h"
@@ -37,6 +39,8 @@ private:
     // 消息存储和会话管理是业务层依赖。
     storage::MessageStore message_store_;
     storage::UserStore user_store_;
+    storage::GroupStore group_store_;
+    storage::GroupMemberStore group_member_store_;
     session::SessionManager session_manager_;
 
     // 工作线程池需要先于 TcpServer 构造，供网络层投递业务任务。

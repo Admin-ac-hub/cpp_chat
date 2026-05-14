@@ -118,6 +118,22 @@ int parse_positive_int_or_default(const std::string& value, int default_value) {
     return default_value;
 }
 
+int parse_non_negative_int_or_default(const std::string& value, int default_value) {
+    if (value.empty()) {
+        return default_value;
+    }
+
+    try {
+        const int parsed = std::stoi(value);
+        if (parsed >= 0) {
+            return parsed;
+        }
+    } catch (...) {
+    }
+
+    return default_value;
+}
+
 int get_env_positive_int_or_default(const char* name, int default_value) {
     const char* value = std::getenv(name);
     if (value == nullptr || value[0] == '\0') {
@@ -125,6 +141,15 @@ int get_env_positive_int_or_default(const char* name, int default_value) {
     }
 
     return parse_positive_int_or_default(value, default_value);
+}
+
+int get_env_non_negative_int_or_default(const char* name, int default_value) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return default_value;
+    }
+
+    return parse_non_negative_int_or_default(value, default_value);
 }
 
 } // namespace
@@ -158,6 +183,39 @@ ServerConfig load_default_config() {
     config.db_pool_size = parse_positive_int_or_default(
         get_file_value_or_default(file_values, "CPP_CHAT_DB_POOL_SIZE", ""),
         config.db_pool_size);
+    config.db_connect_timeout_seconds = parse_positive_int_or_default(
+        get_file_value_or_default(file_values, "CPP_CHAT_DB_CONNECT_TIMEOUT_SECONDS", ""),
+        config.db_connect_timeout_seconds);
+    config.db_read_timeout_seconds = parse_positive_int_or_default(
+        get_file_value_or_default(file_values, "CPP_CHAT_DB_READ_TIMEOUT_SECONDS", ""),
+        config.db_read_timeout_seconds);
+    config.db_write_timeout_seconds = parse_positive_int_or_default(
+        get_file_value_or_default(file_values, "CPP_CHAT_DB_WRITE_TIMEOUT_SECONDS", ""),
+        config.db_write_timeout_seconds);
+    config.db_acquire_timeout_ms = parse_positive_int_or_default(
+        get_file_value_or_default(file_values, "CPP_CHAT_DB_ACQUIRE_TIMEOUT_MS", ""),
+        config.db_acquire_timeout_ms);
+    config.db_max_reconnect_attempts = parse_non_negative_int_or_default(
+        get_file_value_or_default(file_values, "CPP_CHAT_DB_MAX_RECONNECT_ATTEMPTS", ""),
+        config.db_max_reconnect_attempts);
+    config.db_idle_ping_interval_seconds = parse_positive_int_or_default(
+        get_file_value_or_default(file_values, "CPP_CHAT_DB_IDLE_PING_INTERVAL_SECONDS", ""),
+        config.db_idle_ping_interval_seconds);
+    config.db_idle_check_interval_seconds = parse_positive_int_or_default(
+        get_file_value_or_default(file_values, "CPP_CHAT_DB_IDLE_CHECK_INTERVAL_SECONDS", ""),
+        config.db_idle_check_interval_seconds);
+    config.max_read_buffer_bytes = parse_positive_int_or_default(
+        get_file_value_or_default(file_values, "CPP_CHAT_MAX_READ_BUFFER_BYTES", ""),
+        config.max_read_buffer_bytes);
+    config.max_write_buffer_bytes = parse_positive_int_or_default(
+        get_file_value_or_default(file_values, "CPP_CHAT_MAX_WRITE_BUFFER_BYTES", ""),
+        config.max_write_buffer_bytes);
+    config.max_response_queue_size = parse_positive_int_or_default(
+        get_file_value_or_default(file_values, "CPP_CHAT_MAX_RESPONSE_QUEUE_SIZE", ""),
+        config.max_response_queue_size);
+    config.max_thread_pool_queue_size = parse_positive_int_or_default(
+        get_file_value_or_default(file_values, "CPP_CHAT_THREAD_POOL_MAX_QUEUE_SIZE", ""),
+        config.max_thread_pool_queue_size);
 
     // 环境变量拥有最高优先级，方便在不改文件的情况下切换数据库。
     config.log_db_host = get_env_or_default("CPP_CHAT_DB_HOST", config.log_db_host);
@@ -172,6 +230,28 @@ ServerConfig load_default_config() {
     config.log_db_name = get_env_or_default("CPP_CHAT_LOG_DB_NAME", config.log_db_name);
     config.db_pool_size = get_env_positive_int_or_default(
         "CPP_CHAT_DB_POOL_SIZE", config.db_pool_size);
+    config.db_connect_timeout_seconds = get_env_positive_int_or_default(
+        "CPP_CHAT_DB_CONNECT_TIMEOUT_SECONDS", config.db_connect_timeout_seconds);
+    config.db_read_timeout_seconds = get_env_positive_int_or_default(
+        "CPP_CHAT_DB_READ_TIMEOUT_SECONDS", config.db_read_timeout_seconds);
+    config.db_write_timeout_seconds = get_env_positive_int_or_default(
+        "CPP_CHAT_DB_WRITE_TIMEOUT_SECONDS", config.db_write_timeout_seconds);
+    config.db_acquire_timeout_ms = get_env_positive_int_or_default(
+        "CPP_CHAT_DB_ACQUIRE_TIMEOUT_MS", config.db_acquire_timeout_ms);
+    config.db_max_reconnect_attempts = get_env_non_negative_int_or_default(
+        "CPP_CHAT_DB_MAX_RECONNECT_ATTEMPTS", config.db_max_reconnect_attempts);
+    config.db_idle_ping_interval_seconds = get_env_positive_int_or_default(
+        "CPP_CHAT_DB_IDLE_PING_INTERVAL_SECONDS", config.db_idle_ping_interval_seconds);
+    config.db_idle_check_interval_seconds = get_env_positive_int_or_default(
+        "CPP_CHAT_DB_IDLE_CHECK_INTERVAL_SECONDS", config.db_idle_check_interval_seconds);
+    config.max_read_buffer_bytes = get_env_positive_int_or_default(
+        "CPP_CHAT_MAX_READ_BUFFER_BYTES", config.max_read_buffer_bytes);
+    config.max_write_buffer_bytes = get_env_positive_int_or_default(
+        "CPP_CHAT_MAX_WRITE_BUFFER_BYTES", config.max_write_buffer_bytes);
+    config.max_response_queue_size = get_env_positive_int_or_default(
+        "CPP_CHAT_MAX_RESPONSE_QUEUE_SIZE", config.max_response_queue_size);
+    config.max_thread_pool_queue_size = get_env_positive_int_or_default(
+        "CPP_CHAT_THREAD_POOL_MAX_QUEUE_SIZE", config.max_thread_pool_queue_size);
     return config;
 }
 

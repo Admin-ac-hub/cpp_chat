@@ -1,6 +1,7 @@
 #include "cpp_chat/protocol/message.h"
 
 #include <cctype>
+#include <algorithm>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
@@ -182,6 +183,19 @@ std::uint64_t get_uint64(const JsonObject& object, const std::string& name) {
     return it->second.number_value;
 }
 
+std::uint64_t get_uint64_or(const JsonObject& object,
+                            const std::string& name,
+                            std::uint64_t default_value) {
+    const auto it = object.find(name);
+    if (it == object.end()) {
+        return default_value;
+    }
+    if (it->second.type != JsonValue::Type::Number) {
+        throw std::runtime_error("invalid number field: " + name);
+    }
+    return it->second.number_value;
+}
+
 bool empty(const std::string& value) {
     return value.empty();
 }
@@ -221,12 +235,16 @@ std::string json_number_field(const std::string& name, std::uint64_t value) {
     return "\"" + name + "\":" + std::to_string(value);
 }
 
+std::string json_bool_field(const std::string& name, bool value) {
+    return "\"" + name + "\":" + (value ? "true" : "false");
+}
+
 std::string json_type(const std::string& type) {
     return "{\"type\":\"" + type + "\"";
 }
 
 std::string finish_json(const std::string& value) {
-    return value + "}\n";
+    return value + "}";
 }
 
 } // namespace
@@ -243,12 +261,16 @@ std::string to_string(MessageType type) {
             return "direct_chat";
         case MessageType::GroupChat:
             return "group_chat";
+        case MessageType::CreateGroup:
+            return "create_group";
         case MessageType::GroupJoin:
             return "group_join";
         case MessageType::GroupLeave:
             return "group_leave";
         case MessageType::HistoryQuery:
             return "history_query";
+        case MessageType::UnreadQuery:
+            return "unread_query";
         case MessageType::Ping:
             return "ping";
         case MessageType::System:
@@ -308,6 +330,16 @@ bool parse_client_command(const std::string& line, ClientCommand& command, std::
             return true;
         }
 
+        if (type == "create_group") {
+            command.type = MessageType::CreateGroup;
+            command.group_name = get_string(object, "name");
+            if (empty(command.group_name)) {
+                error = "group name is required";
+                return false;
+            }
+            return true;
+        }
+
         if (type == "join_group") {
             command.type = MessageType::GroupJoin;
             command.group_id = get_uint64(object, "group_id");
@@ -337,6 +369,9 @@ bool parse_client_command(const std::string& line, ClientCommand& command, std::
         if (type == "history") {
             command.type = MessageType::HistoryQuery;
             command.target_username = get_string(object, "peer");
+            command.limit = static_cast<std::uint32_t>(
+                std::min<std::uint64_t>(get_uint64_or(object, "limit", 20), 100));
+            command.before_id = get_uint64_or(object, "before_id", 0);
             if (empty(command.target_username)) {
                 error = "peer is required";
                 return false;
@@ -349,6 +384,17 @@ bool parse_client_command(const std::string& line, ClientCommand& command, std::
             command.group_history = true;
             command.group_id = get_uint64(object, "group_id");
             command.receiver_id = command.group_id;
+            command.limit = static_cast<std::uint32_t>(
+                std::min<std::uint64_t>(get_uint64_or(object, "limit", 20), 100));
+            command.before_id = get_uint64_or(object, "before_id", 0);
+            return true;
+        }
+
+        if (type == "unread") {
+            command.type = MessageType::UnreadQuery;
+            command.last_seen_message_id = get_uint64_or(object, "last_seen_message_id", 0);
+            command.limit = static_cast<std::uint32_t>(
+                std::min<std::uint64_t>(get_uint64_or(object, "limit", 20), 100));
             return true;
         }
 
@@ -385,6 +431,20 @@ std::string format_login_failed(const std::string& reason) {
     return finish_json(json_type("login_failed") + "," + json_string_field("reason", reason));
 }
 
+std::string format_create_group_success(std::uint64_t group_id, const std::string& name) {
+    return finish_json(json_type("create_group_success") + "," +
+                       json_number_field("group_id", group_id) + "," +
+                       json_string_field("name", name));
+}
+
+std::string format_message_ack(std::uint64_t message_id, bool stored, bool delivered) {
+    return finish_json(json_type("message_ack") + "," +
+                       json_number_field("message_id", message_id) + "," +
+                       json_string_field("status", stored ? "stored" : "failed") + "," +
+                       json_bool_field("stored", stored) + "," +
+                       json_bool_field("delivered", delivered));
+}
+
 std::string format_direct_message(const std::string& sender_username, const std::string& body) {
     return finish_json(json_type("dm") + "," + json_string_field("from", sender_username) +
                        "," + json_string_field("body", body));
@@ -407,8 +467,32 @@ std::string format_history_item(const std::string& chat_type,
                        "," + json_string_field("body", body));
 }
 
+std::string format_history_item(std::uint64_t message_id,
+                                const std::string& chat_type,
+                                const std::string& from,
+                                const std::string& to,
+                                const std::string& body,
+                                const std::string& created_at) {
+    return finish_json(json_type("history_item") + "," + json_number_field("message_id", message_id) +
+                       "," + json_string_field("chat_type", chat_type) +
+                       "," + json_string_field("from", from) +
+                       "," + json_string_field("to", to) +
+                       "," + json_string_field("body", body) +
+                       "," + json_string_field("created_at", created_at));
+}
+
 std::string format_history_end() {
     return finish_json(json_type("history_end"));
+}
+
+std::string format_history_end(bool has_more, std::uint64_t next_before_id) {
+    return finish_json(json_type("history_end") + "," + json_bool_field("has_more", has_more) +
+                       "," + json_number_field("next_before_id", next_before_id));
+}
+
+std::string format_unread_end(bool has_more, std::uint64_t next_last_seen_message_id) {
+    return finish_json(json_type("unread_end") + "," + json_bool_field("has_more", has_more) +
+                       "," + json_number_field("next_last_seen_message_id", next_last_seen_message_id));
 }
 
 std::string format_pong() {

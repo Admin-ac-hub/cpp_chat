@@ -10,7 +10,7 @@ The backend starts as a TCP server with clear module boundaries:
 - Protocol: defines message types and serialization rules.
 - Session: tracks online users and active connections.
 - Chat: routes one-to-one and group messages.
-- Storage: persists users, groups, messages, and chat history.
+- Storage: persists users, group membership, messages, and chat history.
 - Logging: records server events and operational errors.
 
 ## Dependency Direction
@@ -35,5 +35,6 @@ back to connections.
 
 ## Protocol
 
-The wire protocol is not finalized yet. Prefer a length-prefixed JSON message
-format during early development because it is easy to debug and evolve.
+The wire protocol uses a 4-byte network-order length prefix followed by a UTF-8
+JSON payload. JSON keeps the early business protocol easy to inspect, while the
+length prefix gives TCP message framing independent of packet boundaries.

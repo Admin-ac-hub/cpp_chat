@@ -30,9 +30,10 @@ TEST(MessageStore, AppendSingleMessage) {
         /*receiver_id=*/2,
         "hello"
     };
-    store.append(msg);
+    const auto stored = store.append(msg);
 
     const auto all = store.all();
+    EXPECT_EQ(stored.id, 1u);
     ASSERT_EQ(all.size(), 1u);
     EXPECT_EQ(all[0].type, protocol::MessageType::DirectChat);
     EXPECT_EQ(all[0].sender_id, 1u);
@@ -43,9 +44,10 @@ TEST(MessageStore, AppendSingleMessage) {
 TEST(MessageStore, AppendMultipleMessagesPreservesOrder) {
     MessageStore store;
     store.append({protocol::MessageType::DirectChat, 1, 2, "first"});
-    store.append({protocol::MessageType::DirectChat, 2, 1, "second"});
+    const auto second = store.append({protocol::MessageType::DirectChat, 2, 1, "second"});
     store.append({protocol::MessageType::DirectChat, 1, 2, "third"});
 
+    EXPECT_EQ(second.id, 2u);
     const auto all = store.all();
     ASSERT_EQ(all.size(), 3u);
     EXPECT_EQ(all[0].body, "first");
@@ -133,6 +135,75 @@ TEST(MessageStore, GroupHistoryReturnsOnlyGroupMessages) {
     EXPECT_EQ(history[1].sender_id, 3u);
     EXPECT_EQ(history[1].receiver_id, 100u);
     EXPECT_EQ(history[1].body, "second");
+}
+
+TEST(MessageStore, DirectHistoryPageUsesMessageIdCursorNewestFirst) {
+    MessageStore store;
+    store.append({protocol::MessageType::DirectChat, 1, 2, "one"});
+    store.append({protocol::MessageType::DirectChat, 2, 1, "two"});
+    store.append({protocol::MessageType::DirectChat, 3, 1, "unrelated"});
+    store.append({protocol::MessageType::DirectChat, 1, 2, "three"});
+
+    const auto first_page = store.direct_history_page(1, 2, 2, 0);
+    ASSERT_EQ(first_page.size(), 2u);
+    EXPECT_EQ(first_page[0].id, 4u);
+    EXPECT_EQ(first_page[0].body, "three");
+    EXPECT_EQ(first_page[1].id, 2u);
+    EXPECT_EQ(first_page[1].body, "two");
+
+    const auto second_page = store.direct_history_page(1, 2, 2, first_page[1].id);
+    ASSERT_EQ(second_page.size(), 1u);
+    EXPECT_EQ(second_page[0].id, 1u);
+    EXPECT_EQ(second_page[0].body, "one");
+}
+
+TEST(MessageStore, GroupHistoryPageUsesMessageIdCursorNewestFirst) {
+    MessageStore store;
+    store.append({protocol::MessageType::GroupChat, 1, 100, "one"});
+    store.append({protocol::MessageType::GroupChat, 2, 100, "two"});
+    store.append({protocol::MessageType::GroupChat, 3, 200, "other"});
+    store.append({protocol::MessageType::GroupChat, 1, 100, "three"});
+
+    const auto first_page = store.group_history_page(100, 2, 0);
+    ASSERT_EQ(first_page.size(), 2u);
+    EXPECT_EQ(first_page[0].id, 4u);
+    EXPECT_EQ(first_page[0].body, "three");
+    EXPECT_EQ(first_page[1].id, 2u);
+    EXPECT_EQ(first_page[1].body, "two");
+
+    const auto second_page = store.group_history_page(100, 2, first_page[1].id);
+    ASSERT_EQ(second_page.size(), 1u);
+    EXPECT_EQ(second_page[0].id, 1u);
+    EXPECT_EQ(second_page[0].body, "one");
+}
+
+TEST(MessageStore, UnreadPageReturnsDirectAndJoinedGroupMessagesAfterCursor) {
+    MessageStore store;
+    store.append({protocol::MessageType::DirectChat, 1, 2, "dm old"});
+    store.append({protocol::MessageType::DirectChat, 1, 2, "dm new"});
+    store.append({protocol::MessageType::DirectChat, 2, 1, "sent by me"});
+    store.append({protocol::MessageType::GroupChat, 3, 100, "group new"});
+    store.append({protocol::MessageType::GroupChat, 2, 100, "own group"});
+    store.append({protocol::MessageType::GroupChat, 4, 200, "other group"});
+
+    const auto unread = store.unread_page(2, {100}, 1, 10);
+
+    ASSERT_EQ(unread.size(), 2u);
+    EXPECT_EQ(unread[0].id, 2u);
+    EXPECT_EQ(unread[0].body, "dm new");
+    EXPECT_EQ(unread[1].id, 4u);
+    EXPECT_EQ(unread[1].body, "group new");
+}
+
+TEST(MessageStore, UnreadPageRespectsLimit) {
+    MessageStore store;
+    store.append({protocol::MessageType::DirectChat, 1, 2, "one"});
+    store.append({protocol::MessageType::DirectChat, 1, 2, "two"});
+
+    const auto unread = store.unread_page(2, {}, 0, 1);
+
+    ASSERT_EQ(unread.size(), 1u);
+    EXPECT_EQ(unread[0].body, "one");
 }
 
 } // namespace cpp_chat::storage

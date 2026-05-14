@@ -53,9 +53,12 @@ add_library(cpp_chat_lib OBJECT
     src/core/server_config.cpp
     src/core/thread_pool.cpp
     src/logging/logger.cpp
+    src/network/packet_codec.cpp
     src/network/tcp_server.cpp
     src/protocol/message.cpp
     src/session/session_manager.cpp
+    src/storage/group_store.cpp
+    src/storage/group_member_store.cpp
     src/storage/message_store.cpp
     src/storage/mysql_connection_pool.cpp
     src/storage/user_store.cpp
@@ -97,10 +100,15 @@ if(GTest_FOUND)
 
     add_executable(cpp_chat_tests
         tests/test_protocol.cpp
+        tests/test_packet_codec.cpp
         tests/test_session.cpp
+        tests/test_group_store.cpp
+        tests/test_group_member_store.cpp
         tests/test_message_store.cpp
         tests/test_mysql_connection_pool.cpp
+        tests/test_server_config.cpp
         tests/test_user_store.cpp
+        tests/test_thread_pool.cpp
         tests/test_chat_service.cpp
     )
 

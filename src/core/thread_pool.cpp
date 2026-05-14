@@ -2,7 +2,8 @@
 
 namespace cpp_chat::core {
 
-ThreadPool::ThreadPool(std::size_t num_threads) {
+ThreadPool::ThreadPool(std::size_t num_threads, std::size_t max_queue_size)
+    : max_queue_size_(max_queue_size == 0 ? 1 : max_queue_size) {
     workers_.reserve(num_threads);
     for (std::size_t i = 0; i < num_threads; ++i) {
         workers_.emplace_back([this]() {
@@ -19,6 +20,11 @@ ThreadPool::ThreadPool(std::size_t num_threads) {
             }
         });
     }
+}
+
+std::size_t ThreadPool::queued_tasks() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return tasks_.size();
 }
 
 ThreadPool::~ThreadPool() {

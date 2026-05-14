@@ -120,6 +120,19 @@ TEST_F(SessionManagerTest, UnbindConnection) {
     EXPECT_FALSE(mgr.is_username_online("alice"));
 }
 
+TEST_F(SessionManagerTest, UsernameCanLoginAgainAfterDisconnectCleanup) {
+    mgr.bind({1, 10, "alice"});
+    mgr.unbind_connection(10);
+
+    EXPECT_FALSE(mgr.is_username_online("alice"));
+
+    mgr.bind({1, 20, "alice"});
+    const auto session = mgr.find_by_username("alice");
+    ASSERT_TRUE(session.has_value());
+    EXPECT_EQ(session->connection_id, 20u);
+    EXPECT_FALSE(mgr.find_by_connection(10).has_value());
+}
+
 TEST_F(SessionManagerTest, UnbindUnknownConnectionIsNoOp) {
     // 断开一个从未登录的连接，不应 crash。
     EXPECT_NO_THROW(mgr.unbind_connection(999));
